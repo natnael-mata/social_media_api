@@ -17,7 +17,10 @@
     10. Disk speed test (WinSAT)
     11. Virus / security check (Windows Defender status, threat history,
         quick scan)
-    12. Performance snapshot (CPU, RAM, disk queue, top processes)
+    12. Printer status (offline/error printers, stuck jobs, spooler,
+        network printer reachability)
+    13. Network connection status (adapters, IP/gateway, internet, DNS)
+    14. Performance snapshot (CPU, RAM, disk queue, top processes)
 
     When finished the full report is saved as a .txt file ON THE DESKTOP
     (plus a backup copy in C:\DiskHealthLogs).
@@ -432,8 +435,139 @@ try {
     } catch { Add-Warning 'Could not determine antivirus status on this machine.' }
 }
 
-# ---------------------------------------------- 12. CPU / RAM / top processes
-Write-Section '12. SYSTEM PERFORMANCE SNAPSHOT'
+# ------------------------------------------------------- 12. Printer status
+Write-Section '12. PRINTER STATUS'
+try {
+    # Print Spooler service must be running for any printing at all
+    $spooler = Get-Service -Name Spooler -ErrorAction Stop
+    Write-Log ("  Print Spooler service : {0}" -f $spooler.Status)
+    if ($spooler.Status -ne 'Running') {
+        Add-Issue 'Print Spooler service is NOT running - no printer will work. Start it (services.msc) or reboot.'
+    }
+
+    $printers = Get-Printer -ErrorAction Stop
+    $wmiPrinters = Get-CimInstance Win32_Printer -ErrorAction SilentlyContinue
+    if (-not $printers) {
+        Write-Log '  No printers installed on this machine.'
+    } else {
+        $defaultName = ($wmiPrinters | Where-Object Default | Select-Object -First 1).Name
+        Write-Log ("  Installed printers: {0}   Default: {1}" -f @($printers).Count, $(if ($defaultName) { $defaultName } else { 'none set' }))
+        if (-not $defaultName) { Add-Warning 'No default printer is set.' }
+
+        foreach ($p in $printers) {
+            Write-Log ''
+            $isDefault = if ($p.Name -eq $defaultName) { '  (DEFAULT)' } else { '' }
+            Write-Log ("  Printer: {0}{1}" -f $p.Name, $isDefault)
+            Write-Log ("    Driver : {0}" -f $p.DriverName)
+            Write-Log ("    Port   : {0}" -f $p.PortName)
+            Write-Log ("    Status : {0}" -f $p.PrinterStatus)
+
+            $wmi = $wmiPrinters | Where-Object { $_.Name -eq $p.Name }
+            $offline = $wmi -and $wmi.WorkOffline
+            if ($offline) { Write-Log '    Offline: Yes (Windows has it in "Use Printer Offline" mode)' }
+
+            # Skip virtual printers (PDF/XPS/OneNote/Fax) when raising flags
+            $isVirtual = $p.Name -match 'PDF|XPS|OneNote|Fax|Print to'
+            if (-not $isVirtual) {
+                if ($offline -or $p.PrinterStatus -eq 'Offline') {
+                    Add-Issue ("Printer '{0}' is OFFLINE - check power/cable/network, then untick 'Use Printer Offline'." -f $p.Name)
+                } elseif ($p.PrinterStatus -match 'Error|PaperJam|PaperOut|TonerLow|DoorOpen|NotAvailable') {
+                    Add-Issue ("Printer '{0}' reports status '{1}' - check the device." -f $p.Name, $p.PrinterStatus)
+                } elseif ($p.PrinterStatus -eq 'Normal') {
+                    Write-Pass ("Printer '{0}' status Normal" -f $p.Name)
+                }
+            }
+
+            # Stuck / failed jobs in the queue
+            try {
+                $jobs = Get-PrintJob -PrinterName $p.Name -ErrorAction Stop
+                if ($jobs) {
+                    Write-Log ("    Jobs in queue: {0}" -f @($jobs).Count)
+                    foreach ($j in $jobs) {
+                        Write-Log ("      [{0}] '{1}' by {2}  status: {3}" -f $j.SubmittedTime, $j.DocumentName, $j.UserName, $j.JobStatus)
+                    }
+                    $stuck = $jobs | Where-Object { $_.JobStatus -match 'Error|Blocked' -or $_.SubmittedTime -lt (Get-Date).AddHours(-24) }
+                    if ($stuck) {
+                        Add-Warning ("Printer '{0}' has {1} stuck/failed job(s) in the queue - clear the queue (or restart the Print Spooler)." -f $p.Name, @($stuck).Count)
+                    }
+                }
+            } catch { }
+
+            # Network printer reachability: ping the port's host address
+            try {
+                $port = Get-PrinterPort -Name $p.PortName -ErrorAction Stop
+                $hostAddr = $port.PrinterHostAddress
+                if ($hostAddr) {
+                    $reachable = Test-Connection -ComputerName $hostAddr -Count 2 -Quiet -ErrorAction SilentlyContinue
+                    Write-Log ("    Network address: {0}  Ping: {1}" -f $hostAddr, $(if ($reachable) { 'OK' } else { 'FAILED' }))
+                    if (-not $reachable) {
+                        Add-Issue ("Network printer '{0}' at {1} does NOT respond to ping - printer off, disconnected, or IP changed." -f $p.Name, $hostAddr)
+                    }
+                }
+            } catch { }
+        }
+    }
+} catch { Write-Log "  ERROR checking printers: $_" 'Red' }
+
+# -------------------------------------------- 13. Network connection status
+Write-Section '13. NETWORK CONNECTION STATUS'
+try {
+    # --- Adapters ---
+    Write-Log '  Network adapters:'
+    $adapters = Get-NetAdapter -Physical -ErrorAction SilentlyContinue
+    $upAdapters = @($adapters | Where-Object Status -eq 'Up')
+    foreach ($a in $adapters) {
+        Write-Log ("    {0,-28} Status: {1,-12} Speed: {2}" -f $a.Name, $a.Status, $a.LinkSpeed)
+    }
+    if (-not $upAdapters) {
+        Add-Issue 'NO network adapter is connected - check the network cable / Wi-Fi.'
+    }
+
+    # --- IP configuration for connected adapters ---
+    Write-Log ''
+    Write-Log '  IP configuration:'
+    $gateway = $null
+    foreach ($cfg in (Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object { $_.NetAdapter.Status -eq 'Up' })) {
+        $ip  = ($cfg.IPv4Address | Select-Object -First 1).IPAddress
+        $gw  = ($cfg.IPv4DefaultGateway | Select-Object -First 1).NextHop
+        $dns = ($cfg.DNSServer | Where-Object AddressFamily -eq 2 | Select-Object -ExpandProperty ServerAddresses) -join ', '
+        Write-Log ("    {0}: IP {1}  Gateway {2}  DNS {3}" -f $cfg.InterfaceAlias, $ip, $gw, $dns)
+        if (-not $gateway -and $gw) { $gateway = $gw }
+        if ($ip -like '169.254.*') {
+            Add-Issue ("Adapter '{0}' has a 169.254.x.x address - it is NOT getting an IP from the router/DHCP." -f $cfg.InterfaceAlias)
+        }
+    }
+    if ($upAdapters -and -not $gateway) {
+        Add-Issue 'Connected to the network but NO default gateway - check router/DHCP settings.'
+    }
+
+    # --- Connectivity tests ---
+    Write-Log ''
+    Write-Log '  Connectivity tests:'
+    if ($gateway) {
+        $gwOk = Test-Connection -ComputerName $gateway -Count 2 -Quiet -ErrorAction SilentlyContinue
+        Write-Log ("    Ping gateway ({0})      : {1}" -f $gateway, $(if ($gwOk) { 'OK' } else { 'FAILED' }))
+        if (-not $gwOk) { Add-Issue "Cannot reach the gateway/router ($gateway) - local network problem (cable, switch, router)." }
+    }
+    $inetOk = Test-Connection -ComputerName 8.8.8.8 -Count 2 -Quiet -ErrorAction SilentlyContinue
+    Write-Log ("    Ping internet (8.8.8.8)   : {0}" -f $(if ($inetOk) { 'OK' } else { 'FAILED' }))
+    $dnsOk = $false
+    try { $null = [System.Net.Dns]::GetHostAddresses('www.microsoft.com'); $dnsOk = $true } catch { }
+    Write-Log ("    DNS lookup (microsoft.com): {0}" -f $(if ($dnsOk) { 'OK' } else { 'FAILED' }))
+
+    if ($upAdapters) {
+        if (-not $inetOk) {
+            Add-Issue 'No internet connection (ping to 8.8.8.8 failed) - problem is at the router/ISP side if the gateway pings OK.'
+        } elseif (-not $dnsOk) {
+            Add-Issue 'Internet works but DNS FAILS - websites will not load by name. Fix DNS server settings (try 8.8.8.8).'
+        } else {
+            Write-Pass 'Network OK: gateway, internet and DNS all respond.'
+        }
+    }
+} catch { Write-Log "  ERROR checking network: $_" 'Red' }
+
+# ---------------------------------------------- 14. CPU / RAM / top processes
+Write-Section '14. SYSTEM PERFORMANCE SNAPSHOT'
 try {
     $cpuLoad = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
     $os      = Get-CimInstance Win32_OperatingSystem
@@ -471,7 +605,7 @@ Write-Section 'SUMMARY'
 Write-Log ("  Completed: {0}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
 Write-Log ''
 if ($script:Issues.Count -eq 0 -and $script:Warnings.Count -eq 0) {
-    Write-Log '  OVERALL RESULT: PASS - no disk health, virus or performance problems detected.' 'Green'
+    Write-Log '  OVERALL RESULT: PASS - no disk, virus, printer, network or performance problems detected.' 'Green'
 } else {
     if ($script:Issues.Count -gt 0) {
         Write-Log ("  CRITICAL ISSUES ({0}):" -f $script:Issues.Count) 'Red'

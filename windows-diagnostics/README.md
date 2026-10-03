@@ -45,7 +45,9 @@ powershell -ExecutionPolicy Bypass -File .\DiskHealthCheck.ps1 -SkipVirusScan -S
 | 9 | Disk/NTFS/controller errors in the event log (14 days) | Hardware trouble signs |
 | 10 | WinSAT disk speed test | Slow/failing drives, SSD upgrade case |
 | 11 | **Virus check**: Defender status, definition age, 30-day threat history, **quick scan** (lists infected files) | Malware on the machine |
-| 12 | CPU load, RAM usage, disk queue, top 10 processes by CPU and RAM | Performance bottlenecks |
+| 12 | **Printers**: spooler service, every printer's status (offline/error), stuck print jobs, ping test for network printers | Printers that won't print |
+| 13 | **Network**: adapter status/speed, IP/gateway/DNS config, ping gateway, ping internet, DNS lookup | No-internet and local network problems |
+| 14 | CPU load, RAM usage, disk queue, top 10 processes by CPU and RAM | Performance bottlenecks |
 
 ## Reading the results
 
@@ -65,6 +67,11 @@ Typical actions for critical issues:
 - *SFC/DISM found corruption* → run `DISM /Online /Cleanup-Image /RestoreHealth`
   then `sfc /scannow` as admin.
 - *Active threat found* → run a FULL scan in Windows Security and quarantine.
+- *Printer offline / no ping* → check printer power and cable/Wi-Fi, confirm
+  its IP hasn't changed, untick "Use Printer Offline"; stuck jobs → clear the
+  queue or restart the Print Spooler service.
+- *No gateway / 169.254.x.x address* → cable, switch or DHCP/router problem;
+  *internet OK but DNS fails* → set DNS to 8.8.8.8.
 - *Low free space* → disk cleanup / move data.
 
 The script is diagnostic-only: it repairs and deletes nothing, so it is safe
