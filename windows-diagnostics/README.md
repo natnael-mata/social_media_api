@@ -1,55 +1,73 @@
-# Dell Desktop — Disk Health & Performance Diagnostic
+# Dell Desktop — Full Health Check (Specs + Disk + Virus + Performance)
 
-A self-contained, read-only diagnostic for Windows 10/11 Dell desktops. It
-checks hard disk health and system performance, then writes a full report to
-`C:\DiskHealthLogs\` so logs can be collected from each machine and fixes
-planned from the findings.
+A self-contained diagnostic for Windows 10/11 Dell desktops. It records the
+full desktop specification, checks hard disk health, corrupted system files,
+viruses (Windows Defender), and system performance, then **saves the full
+report as a .txt file on the Desktop** (with a backup copy in
+`C:\DiskHealthLogs\`). Collect the report from each machine to decide what
+software it can run and what should be improved.
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `RUN-DISK-CHECK.bat` | Double-click this to run everything |
+| `DiskHealthCheck.ps1` | The actual diagnostic script |
 
 ## How to run (per desktop)
 
-1. Copy the whole `windows-diagnostics` folder to the PC (USB stick, network
-   share, or download).
+1. Copy **both files** into the same folder on the PC (USB stick is fine).
 2. **Double-click `RUN-DISK-CHECK.bat`.**
 3. Click **Yes** on the admin (UAC) prompt.
-4. Wait 3–6 minutes. The window shows live results; when it finishes it prints
-   the log path and waits for a key press.
-5. Collect the log file from `C:\DiskHealthLogs\DiskHealth_<PCNAME>_<date>.log`.
+4. Wait **15–30 minutes** (the virus quick scan and system file check take the
+   longest; the PC stays usable).
+5. When finished, the report appears **on the Desktop** as
+   `PC-Health-Report_<PCNAME>_<date>.txt` — collect that file.
 
-No installation, no internet, no changes to the machine — the script only
-reads and reports (the CHKDSK step runs in `/scan` mode, which does not repair).
-
-To skip the 1–2 minute disk speed test, run instead:
+Faster run (skip the slow parts — virus scan, system file check, speed test):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\DiskHealthCheck.ps1 -SkipSpeedTest
+powershell -ExecutionPolicy Bypass -File .\DiskHealthCheck.ps1 -SkipVirusScan -SkipSystemFileCheck -SkipSpeedTest
 ```
 
-## What it checks
+## What the report contains
 
-| Section | Check | Flags raised |
+| Section | Check | Used for |
 |---|---|---|
-| 1 | Dell model, Service Tag, BIOS, OS, uptime | Uptime over 14 days |
-| 2 | Physical disk health, temperature, SSD wear, uncorrected errors | Unhealthy disk, hot disk, worn SSD, media errors |
-| 3 | SMART firmware failure-prediction flag | Drive predicting its own failure |
-| 4 | Volume free space and the NTFS dirty flag | <10% free (critical), <20% (warning), dirty volume |
-| 5 | `chkdsk C: /scan` (online, read-only) | File system corruption |
-| 6 | Disk/NTFS/controller errors in the System event log (14 days) | Repeated disk error events |
-| 7 | WinSAT disk speed test | Sequential read <80 MB/s (failing/slow drive) |
-| 8 | CPU load, RAM usage, disk queue length, top processes | CPU ≥85%, RAM ≥90%, disk queue >2 |
+| 1 | Dell model, Service Tag, BIOS, OS, uptime | Warranty lookup, Windows 10 end-of-life flag |
+| 2 | **Full spec**: CPU cores/speed, RAM size + modules + free slots, GPU, motherboard, drive types (SSD/HDD), network | Deciding what software the PC can run and what to upgrade |
+| 3 | Installed software list | Reviewing what currently runs on the PC |
+| 4 | Physical disk health, temperature, SSD wear, uncorrected errors | Failing drives |
+| 5 | SMART firmware failure-prediction flag | Drives predicting their own death |
+| 6 | Volume free space + NTFS dirty flag | Low space, pending repairs |
+| 7 | `chkdsk C: /scan` (online, read-only) | File system corruption |
+| 8 | **Unhealthy Windows files**: `sfc /verifyonly` + `DISM /ScanHealth` | Corrupted system files |
+| 9 | Disk/NTFS/controller errors in the event log (14 days) | Hardware trouble signs |
+| 10 | WinSAT disk speed test | Slow/failing drives, SSD upgrade case |
+| 11 | **Virus check**: Defender status, definition age, 30-day threat history, **quick scan** (lists infected files) | Malware on the machine |
+| 12 | CPU load, RAM usage, disk queue, top 10 processes by CPU and RAM | Performance bottlenecks |
 
 ## Reading the results
 
-Every log ends with a **SUMMARY** section:
+Every report ends with a **SUMMARY**:
 
-- **PASS** — nothing found.
-- **PASS WITH WARNINGS** — numbered warnings worth monitoring or cleaning up.
-- **FAIL** — numbered critical issues; typical actions:
-  - *HealthStatus not Healthy / SMART predicts failure / uncorrected errors* →
-    back up immediately and replace the drive (check warranty with the Service
-    Tag in section 1 at support.dell.com).
-  - *CHKDSK found problems or dirty volume* → schedule `chkdsk <drive>: /F` at
-    reboot.
-  - *Low free space* → disk cleanup / move data.
-  - *Slow HDD speeds* → SSD upgrade is usually the biggest single improvement.
+- **PASS / PASS WITH WARNINGS / FAIL** — numbered critical issues and warnings.
+- **RECOMMENDED IMPROVEMENTS** — upgrade suggestions generated from the spec
+  (e.g. add RAM below 8 GB, replace HDD with SSD, too few CPU cores,
+  Windows 10 end-of-life).
 
-Send the collected logs back and we can decide the fixes machine by machine.
+Typical actions for critical issues:
+
+- *Disk not Healthy / SMART predicts failure / uncorrected errors* → back up
+  now and replace the drive (check warranty with the Service Tag at
+  support.dell.com).
+- *CHKDSK found problems or dirty volume* → schedule `chkdsk <drive>: /F` at reboot.
+- *SFC/DISM found corruption* → run `DISM /Online /Cleanup-Image /RestoreHealth`
+  then `sfc /scannow` as admin.
+- *Active threat found* → run a FULL scan in Windows Security and quarantine.
+- *Low free space* → disk cleanup / move data.
+
+The script is diagnostic-only: it repairs and deletes nothing, so it is safe
+to run on every machine. Send the collected Desktop reports back and we can
+decide, machine by machine, what software each PC can handle and what to fix
+or upgrade.
