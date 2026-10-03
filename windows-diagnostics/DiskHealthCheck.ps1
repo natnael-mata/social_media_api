@@ -20,7 +20,11 @@
     12. Printer status (offline/error printers, stuck jobs, spooler,
         network printer reachability)
     13. Network connection status (adapters, IP/gateway, internet, DNS)
-    14. Performance snapshot (CPU, RAM, disk queue, top processes)
+    14. Windows Update status (last update, pending updates, pending
+        reboot, update service)
+    15. Device drivers (devices with driver problems, age of key drivers)
+    16. Other checks (firewall, Windows activation, startup programs)
+    17. Performance snapshot (CPU, RAM, disk queue, top processes)
 
     When finished the full report is saved as a .txt file ON THE DESKTOP
     (plus a backup copy in C:\DiskHealthLogs).
@@ -566,8 +570,134 @@ try {
     }
 } catch { Write-Log "  ERROR checking network: $_" 'Red' }
 
-# ---------------------------------------------- 14. CPU / RAM / top processes
-Write-Section '14. SYSTEM PERFORMANCE SNAPSHOT'
+# --------------------------------------------- 14. Windows Update status
+Write-Section '14. WINDOWS UPDATE STATUS'
+try {
+    $wu = Get-Service -Name wuauserv -ErrorAction SilentlyContinue
+    if ($wu) {
+        Write-Log ("  Windows Update service : {0} (StartType: {1})" -f $wu.Status, $wu.StartType)
+        if ($wu.StartType -eq 'Disabled') { Add-Issue 'Windows Update service is DISABLED - the PC cannot receive security updates.' }
+    }
+
+    # Last installed updates
+    $hotfixes = Get-HotFix -ErrorAction SilentlyContinue | Where-Object InstalledOn | Sort-Object InstalledOn -Descending
+    if ($hotfixes) {
+        $last = $hotfixes | Select-Object -First 1
+        $daysSince = [int]((Get-Date) - $last.InstalledOn).TotalDays
+        Write-Log ("  Last update installed  : {0} ({1}) - {2} days ago" -f $last.HotFixID, $last.InstalledOn.ToString('yyyy-MM-dd'), $daysSince)
+        Write-Log '  Recent updates:'
+        $hotfixes | Select-Object -First 5 | ForEach-Object {
+            Write-Log ("    {0}  {1}  {2}" -f $_.InstalledOn.ToString('yyyy-MM-dd'), $_.HotFixID, $_.Description)
+        }
+        if     ($daysSince -gt 90) { Add-Issue   "No Windows updates installed for $daysSince days - PC is missing security patches. Run Windows Update." }
+        elseif ($daysSince -gt 45) { Add-Warning "Last Windows update was $daysSince days ago - run Windows Update soon." }
+        else                       { Write-Pass  "Updates are recent (last one $daysSince days ago)." }
+    } else {
+        Add-Warning 'Could not read installed update history.'
+    }
+
+    # Pending updates (queries the Windows Update engine; can take 1-3 min)
+    Write-Log ''
+    Write-Log '  Checking for pending updates (1-3 min)...'
+    try {
+        $searcher = (New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher()
+        $pending  = $searcher.Search("IsInstalled=0 and Type='Software' and IsHidden=0")
+        if ($pending.Updates.Count -gt 0) {
+            Write-Log ("  Pending updates: {0}" -f $pending.Updates.Count)
+            foreach ($u in ($pending.Updates | Select-Object -First 10)) { Write-Log ("    - {0}" -f $u.Title) }
+            Add-Warning ("{0} Windows update(s) waiting to be installed - run Windows Update." -f $pending.Updates.Count)
+        } else {
+            Write-Pass 'No pending updates - Windows is up to date.'
+        }
+    } catch { Write-Log '  (Could not query pending updates - check manually in Settings > Windows Update)' }
+
+    # Pending reboot flags
+    $rebootKeys = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired',
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
+    )
+    $needsReboot = $false
+    foreach ($k in $rebootKeys) { if (Test-Path $k) { $needsReboot = $true } }
+    Write-Log ("  Reboot pending         : {0}" -f $(if ($needsReboot) { 'YES' } else { 'No' }))
+    if ($needsReboot) { Add-Warning 'A reboot is pending (updates waiting to finish) - restart this PC.' }
+} catch { Write-Log "  ERROR checking Windows Update: $_" 'Red' }
+
+# -------------------------------------------------- 15. Device drivers
+Write-Section '15. DEVICE DRIVERS'
+try {
+    # Devices with problems (the yellow "!" marks in Device Manager)
+    $errCodes = @{
+        1='Not configured correctly'; 10='Device cannot start'; 12='Not enough resources';
+        18='Reinstall drivers'; 22='Device is disabled'; 28='NO DRIVER INSTALLED';
+        31='Driver could not load'; 39='Driver corrupted or missing'; 43='Device reported failure';
+        45='Device not connected'
+    }
+    $badDevices = Get-CimInstance Win32_PnPEntity -ErrorAction Stop |
+                  Where-Object { $_.ConfigManagerErrorCode -ne 0 -and $_.ConfigManagerErrorCode -ne 45 }
+    if ($badDevices) {
+        Write-Log '  Devices with driver problems (Device Manager yellow marks):'
+        foreach ($d in $badDevices) {
+            $code = [int]$d.ConfigManagerErrorCode
+            $desc = if ($errCodes.ContainsKey($code)) { $errCodes[$code] } else { "error code $code" }
+            Write-Log ("    {0}  ->  {1}" -f $d.Name, $desc)
+            if ($code -eq 22) { Add-Warning ("Device '{0}' is disabled in Device Manager." -f $d.Name) }
+            else { Add-Issue ("Device '{0}' has a driver problem: {1}. Fix in Device Manager or via Dell Support Assist / support.dell.com drivers page." -f $d.Name, $desc) }
+        }
+    } else {
+        Write-Pass 'No devices with driver problems - Device Manager is clean.'
+    }
+
+    # Age/version of the drivers that matter most (graphics, network, storage, audio)
+    Write-Log ''
+    Write-Log '  Key drivers (graphics / network / storage / audio):'
+    $keyDrivers = Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue |
+                  Where-Object { $_.DeviceClass -in 'DISPLAY','NET','HDC','SCSIADAPTER','MEDIA' -and $_.DriverDate } |
+                  Sort-Object DeviceClass, DeviceName -Unique
+    $oldDriverFound = $false
+    foreach ($drv in $keyDrivers) {
+        $ageYears = [math]::Round(((Get-Date) - $drv.DriverDate).TotalDays / 365, 1)
+        Write-Log ("    [{0,-11}] {1,-45} v{2}  ({3:yyyy-MM-dd}, {4} yrs old)" -f $drv.DeviceClass,
+                   ([string]$drv.DeviceName).Substring(0, [math]::Min(45, $drv.DeviceName.Length)),
+                   $drv.DriverVersion, $drv.DriverDate, $ageYears)
+        if ($ageYears -ge 4 -and $drv.DeviceClass -in 'DISPLAY','NET') { $oldDriverFound = $true }
+    }
+    if ($oldDriverFound) {
+        Add-Upgrade 'Graphics and/or network drivers are 4+ years old - update them via Dell SupportAssist or support.dell.com (enter the Service Tag from Section 1).'
+    }
+} catch { Write-Log "  ERROR checking drivers: $_" 'Red' }
+
+# ------------------------- 16. Other checks (firewall, activation, startup)
+Write-Section '16. OTHER CHECKS (firewall, activation, startup programs)'
+try {
+    # --- Firewall ---
+    Write-Log '  Windows Firewall:'
+    foreach ($fw in (Get-NetFirewallProfile -ErrorAction SilentlyContinue)) {
+        Write-Log ("    {0,-10} profile: {1}" -f $fw.Name, $(if ($fw.Enabled) { 'Enabled' } else { 'DISABLED' }))
+        if (-not $fw.Enabled) { Add-Issue ("Windows Firewall '{0}' profile is DISABLED - turn it on in Windows Security." -f $fw.Name) }
+    }
+
+    # --- Windows activation ---
+    try {
+        $lic = Get-CimInstance SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL AND ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f'" -ErrorAction Stop |
+               Select-Object -First 1
+        $licStatus = switch ([int]$lic.LicenseStatus) { 1 {'Activated'} 0 {'UNLICENSED'} 2 {'Grace period'} 3 {'Out-of-tolerance grace'} 4 {'Non-genuine grace'} 5 {'NOTIFICATION (not activated)'} default {"code $($lic.LicenseStatus)"} }
+        Write-Log ''
+        Write-Log ("  Windows activation : {0}" -f $licStatus)
+        if ([int]$lic.LicenseStatus -ne 1) { Add-Warning "Windows is not properly activated (status: $licStatus)." }
+    } catch { Write-Log '  (Could not read activation status)' }
+
+    # --- Startup programs (slow boot cause #1) ---
+    Write-Log ''
+    $startup = Get-CimInstance Win32_StartupCommand -ErrorAction SilentlyContinue
+    Write-Log ("  Startup programs ({0}):" -f @($startup).Count)
+    foreach ($s in $startup) { Write-Log ("    {0,-40} [{1}]" -f $s.Name, $s.Location) }
+    if (@($startup).Count -gt 10) {
+        Add-Upgrade ("{0} programs launch at startup - disabling the unnecessary ones (Task Manager > Startup) will speed up boot." -f @($startup).Count)
+    }
+} catch { Write-Log "  ERROR in other checks: $_" 'Red' }
+
+# ---------------------------------------------- 17. CPU / RAM / top processes
+Write-Section '17. SYSTEM PERFORMANCE SNAPSHOT'
 try {
     $cpuLoad = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
     $os      = Get-CimInstance Win32_OperatingSystem

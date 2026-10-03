@@ -47,7 +47,10 @@ powershell -ExecutionPolicy Bypass -File .\DiskHealthCheck.ps1 -SkipVirusScan -S
 | 11 | **Virus check**: Defender status, definition age, 30-day threat history, **quick scan** (lists infected files) | Malware on the machine |
 | 12 | **Printers**: spooler service, every printer's status (offline/error), stuck print jobs, ping test for network printers | Printers that won't print |
 | 13 | **Network**: adapter status/speed, IP/gateway/DNS config, ping gateway, ping internet, DNS lookup | No-internet and local network problems |
-| 14 | CPU load, RAM usage, disk queue, top 10 processes by CPU and RAM | Performance bottlenecks |
+| 14 | **Windows Update**: last installed update, pending updates, pending reboot, update service state | Unpatched machines |
+| 15 | **Drivers**: devices with driver problems (Device Manager yellow marks), age/version of graphics, network, storage and audio drivers | Broken or outdated drivers |
+| 16 | Firewall profiles, Windows activation, startup program list | Security gaps, slow boot |
+| 17 | CPU load, RAM usage, disk queue, top 10 processes by CPU and RAM | Performance bottlenecks |
 
 ## Reading the results
 
